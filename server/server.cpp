@@ -122,10 +122,10 @@ namespace Server {
             }
 
             // More data needed from client
-            ssize_t n = recv(client_socket_fd, temp, BUF_SIZE, 0);
-            if (n > 0) {
-                recv_buf_.append(temp, static_cast<std::size_t>(n));
-            } else if (n == 0) { // peer closed connection
+            ssize_t nbytes = recv(client_socket_fd, temp, BUF_SIZE, 0);
+            if (nbytes > 0) {
+                recv_buf_.append(temp, static_cast<std::size_t>(nbytes));
+            } else if (nbytes == 0) { // peer closed connection
                 success = false;
                 return std::nullopt;
             } else { // error
