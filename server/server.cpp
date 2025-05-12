@@ -1,8 +1,8 @@
 #include "server.h"
 #include "common/ellipse.h"
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>

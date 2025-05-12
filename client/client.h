@@ -2,6 +2,7 @@
 
 #include "common/ellipse.h"
 #include "ellipse_generator.h"
+#include <optional>
 #include <string>
 
 namespace Client {
