@@ -1,9 +1,19 @@
 #include "server.h"
+#include <csignal>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 
 const int DEFAULT_PORT = 12345;
+
+Server::TcpServer *g_tcp_server_instance = nullptr;
+
+void signal_handler_stop_server(int signum) {
+    std::cout << "\nSignal " << signum << " received. Initiating server shutdown..." << std::endl;
+    if (g_tcp_server_instance) {
+        g_tcp_server_instance->shutdown();
+    }
+}
 
 int main(int argc, char *argv[]) {
     int port = DEFAULT_PORT;
@@ -28,11 +38,31 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    
+    struct sigaction sa;
+    sa.sa_handler = signal_handler_stop_server;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("Error setting SIGINT handler");
+        return 1;
+    }
+    if (sigaction(SIGTERM, &sa, NULL) == -1) {
+        perror("Error setting SIGTERM handler");
+        return 1;
+    }
+
     try {
         Server::TcpServer server(port);
+        g_tcp_server_instance = &server;
+
         server.start();
+        g_tcp_server_instance = nullptr; // when server is stopped
+        std::cout << "Main: Server has shut down gracefully." << std::endl;
     } catch (const std::exception &e) {
         std::cerr << "Server runtime error: " << e.what() << std::endl;
+        g_tcp_server_instance = nullptr;
         return 1;
     }
 

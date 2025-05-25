@@ -4,6 +4,7 @@
       "name": "Mac",
       "includePath": [
         "${workspaceFolder}/common",
+        "${workspaceFolder}/reactor",
         "${workspaceFolder}/client",
         "${workspaceFolder}/server",
         "${workspaceFolder}/**"
@@ -18,6 +19,7 @@
       "name": "Linux",
       "includePath": [
         "${workspaceFolder}/common",
+        "${workspaceFolder}/reactor",
         "${workspaceFolder}/client",
         "${workspaceFolder}/server",
         "${workspaceFolder}/**"

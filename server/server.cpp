@@ -1,25 +1,20 @@
 #include "server.h"
 #include "common/ellipse.h"
-#include <algorithm>
+
+#include <arpa/inet.h>
+#include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <vector>
-
-#include <arpa/inet.h>
-#include <cstring>
-#include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 namespace Server {
 
-    TcpServer::TcpServer(int port) : port_(port), server_socket_fd_(-1) {
-        simulator_.clear_ellipses();
-    }
+    TcpServer::TcpServer(int port) : port_{port}, server_socket_fd_{-1} {}
 
     void TcpServer::start() {
         server_socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
@@ -33,6 +28,7 @@ namespace Server {
         }
 
         sockaddr_in server_address{};
+        std::memset(&server_address, 0, sizeof(server_address));
         server_address.sin_family = AF_INET;
         server_address.sin_addr.s_addr = INADDR_ANY;
         server_address.sin_port = htons(port_);
@@ -42,128 +38,185 @@ namespace Server {
             throw std::runtime_error("Error: Could not bind to port " + std::to_string(port_) + ". " + std::string(strerror(errno)));
         }
 
-        if (listen(server_socket_fd_, 5) < 0) {
+        if (listen(server_socket_fd_, 10) < 0) {
             close(server_socket_fd_);
             throw std::runtime_error("Error: Listen failed. " + std::string(strerror(errno)));
         }
 
         std::cout << "Server listening on port " << port_ << std::endl;
 
-        while (true) {
-            sockaddr_in client_address{};
-            socklen_t client_len = sizeof(client_address);
-            int client_socket_fd = accept(server_socket_fd_, (struct sockaddr *)&client_address, &client_len);
+        reactor_.addFd(server_socket_fd_, [this](int fd) {
+            accept_handler(fd);
+        });
 
-            if (client_socket_fd < 0) {
-                std::cerr << "Error: Accept failed. " << strerror(errno) << ". Continuing..." << std::endl;
-                continue;
-            }
-
-            char client_ip_str[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &client_address.sin_addr, client_ip_str, INET_ADDRSTRLEN);
-            std::cout << "Connection accepted from " << client_ip_str << ":" << ntohs(client_address.sin_port) << std::endl;
-
-            simulator_.clear_ellipses(); // Reset simulator for new client session
-            handle_client(client_socket_fd);
-            close(client_socket_fd);
-            std::cout << "Connection closed with " << client_ip_str << std::endl;
-        }
+        reactor_.start();
+        reactor_.wait();
     }
 
-    void TcpServer::handle_client(int client_socket_fd) {
-        bool client_connected = true;
-        while (client_connected) {
-            auto line_opt = read_line_from_client(client_socket_fd, client_connected);
-
-            if (!client_connected || !line_opt) {
-                break;
-            }
-
-            std::string line = *line_opt;
-            std::cout << "Server RX: " << line << std::endl;
-
-            std::istringstream iss(line);
-            Ellipse ellipse;
-            if (!(iss >> ellipse.cx >> ellipse.cy >> ellipse.a >> ellipse.b)) {
-                std::cerr << "Error: Could not parse ellipse data from client: " << line << std::endl;
-                break;
-            }
-
-            if (ellipse.a <= 0 || ellipse.b <= 0) {
-                std::cerr << "Error: Invalid ellipse parameters (a or b not positive): a="
-                          << ellipse.a << ", b=" << ellipse.b << std::endl;
-                break;
-            }
-
-            simulator_.add_ellipse(ellipse);
-            std::cout << "Added ellipse. Total ellipses: " << simulator_.get_ellipse_count() << std::endl;
-
-            MonteCarloResult result = simulator_.estimate_area();
-
-            if (!send_response_to_client(client_socket_fd, result)) {
-                std::cerr << "Error: Failed to send response to client." << std::endl;
-                break;
-            }
-        }
+    void TcpServer::shutdown() {
+        std::cout << "TcpServer: Initiating shutdown..." << std::endl;
+        reactor_.stop();
     }
 
-    std::optional<std::string> TcpServer::read_line_from_client(int client_socket_fd, bool &success) {
-        constexpr std::size_t BUF_SIZE = 256;
-        char temp[BUF_SIZE];
-        success = true;
+    void TcpServer::accept_handler(int server_socket_fd_) {
+        sockaddr_in client_address{};
+        socklen_t client_len = sizeof(client_address);
+        int client_socket_fd = accept(server_socket_fd_, (struct sockaddr *)&client_address, &client_len);
 
-        while (true) {
-            // First check if we already have a full line in recv_buf_
-            auto nl = std::find(recv_buf_.begin(), recv_buf_.end(), '\n');
-            if (nl != recv_buf_.end()) {
-                std::string line(recv_buf_.begin(), nl);
-                recv_buf_.erase(recv_buf_.begin(), nl + 1);
-                return line;
-            }
+        if (client_socket_fd < 0) {
+            perror("Server::accept_handler accept");
 
-            // More data needed from client
-            ssize_t nbytes = recv(client_socket_fd, temp, BUF_SIZE, 0);
-            if (nbytes > 0) {
-                recv_buf_.append(temp, static_cast<std::size_t>(nbytes));
-            } else if (nbytes == 0) { // peer closed connection
-                success = false;
-                return std::nullopt;
-            } else { // error
-                if (errno == EINTR)
+            return;
+        }
+
+        char client_ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_address.sin_addr, client_ip_str, INET_ADDRSTRLEN);
+        std::cout << "Connection accepted from " << client_ip_str << ":" << ntohs(client_address.sin_port)
+                  << " on new fd " << client_socket_fd << std::endl;
+
+        // Setup per-client session
+        ClientSession new_session;
+        std::ostringstream fname;
+        fname << "client_" << next_log_id_.fetch_add(1) << ".log";
+        new_session.log.open(fname.str(), std::ios::out);
+        if (!new_session.log.is_open()) {
+            std::cerr << "Error: Could not open log file " << fname.str() << std::endl;
+        } else {
+            new_session.log << std::fixed << std::setprecision(2);
+            new_session.log << "Log started for client fd " << client_socket_fd << " from " << client_ip_str << std::endl;
+        }
+
+        clients_.emplace(client_socket_fd, std::move(new_session));
+
+        // Add the new client socket to the reactor
+        reactor_.addFd(client_socket_fd, [this](int fd) {
+            this->client_handler(fd);
+        });
+    }
+
+    void TcpServer::client_handler(int client_fd) {
+        auto it = clients_.find(client_fd);
+        if (it == clients_.end()) {
+            std::cerr << "Error: No session found for client fd " << client_fd << ". Removing from reactor." << std::endl;
+            reactor_.removeFd(client_fd);
+            return;
+        }
+
+        ClientSession &sess = it->second;
+
+        constexpr size_t RECV_BUF_SIZE = 256;
+        char temp_recv_buf[RECV_BUF_SIZE];
+
+        ssize_t nbytes = recv(client_fd, temp_recv_buf, RECV_BUF_SIZE - 1, 0);
+
+        if (nbytes > 0) {
+            // temp_recv_buf[nbytes] = '\0'; // For logging
+            // std::cout << "Server RX (fd " << client_fd << ", " << nbytes << " bytes): " << temp_recv_buf << std::endl;
+            sess.recv_buf.append(temp_recv_buf, static_cast<size_t>(nbytes));
+
+            // Process all complete lines from the session's accumulated buffer
+            while (true) {
+                auto line_opt = read_line_from_buffer(sess);
+                if (!line_opt) {
+                    break;
+                }
+
+                std::string line = *line_opt;
+                // std::cout << "Server Processed Line (fd " << client_fd << "): " << line << std::endl;
+
+                Ellipse ellipse;
+                std::istringstream iss(line);
+                if (!(iss >> ellipse.cx >> ellipse.cy >> ellipse.a >> ellipse.b) || ellipse.a <= 0 || ellipse.b <= 0) {
+                    std::cerr << "Warning: Bad ellipse data from client " << client_fd << ": \"" << line << "\"" << std::endl;
+                    if (sess.log.is_open()) {
+                        sess.log << "Warning: Received bad ellipse data: " << line << std::endl;
+                    }
                     continue;
-                perror("recv error in read_line_from_client");
-                success = false;
-                return std::nullopt;
+                }
+
+                sess.simulator.add_ellipse(ellipse);
+                MonteCarloResult res = sess.simulator.estimate_area();
+
+                sess.msg_count++;
+                if (sess.log.is_open()) {
+                    sess.log << "Msg #" << sess.msg_count
+                             << ": Ellipses=" << sess.simulator.get_ellipse_count()
+                             << ", Est. Area=" << res.covered_area
+                             << ", Est. Coverage=" << res.percentage_covered << "%\n";
+                    sess.log.flush();
+                }
+
+                if (!send_response_to_client(client_fd, res)) {
+                    std::cerr << "Error: Failed to send response to client " << client_fd << ". Closing connection." << std::endl;
+                    if (sess.log.is_open()) {
+                        sess.log << "Error: Failed to send response. Closing connection." << std::endl;
+                        sess.log.close();
+                    }
+                    if (close(client_fd) < 0) {
+                        perror("Server::client_handler close");
+                    }
+                    clients_.erase(it);
+                    reactor_.removeFd(client_fd);
+                    return;
+                }
             }
+        } else if (nbytes <= 0) { // Connection closed by peer
+            if (nbytes == 0) {
+                std::cout << "Client fd " << client_fd << " disconnected." << std::endl;
+                if (sess.log.is_open()) {
+                    sess.log << "Client disconnected. Total messages: " << sess.msg_count << std::endl;
+                    sess.log.close();
+                }
+            } else { // recv error (nbytes < 0)
+                if (sess.log.is_open()) {
+                    sess.log << "Recv error. Closing connection. Total messages: " << sess.msg_count << std::endl;
+                    sess.log.close();
+                }
+            }
+
+            if (close(client_fd) < 0) {
+                perror("Server::client_handler close");
+            }
+            clients_.erase(it);
+            reactor_.removeFd(client_fd);
         }
+    }
+
+    std::optional<std::string> TcpServer::read_line_from_buffer(ClientSession &sess) {
+        auto nl_pos = std::find(sess.recv_buf.begin(), sess.recv_buf.end(), '\n');
+        if (nl_pos != sess.recv_buf.end()) {
+            std::string line(sess.recv_buf.begin(), nl_pos);
+            sess.recv_buf.erase(sess.recv_buf.begin(), nl_pos + 1);
+            return line;
+        }
+        return std::nullopt; // No complete data yet
+    }
+
+    bool TcpServer::send_response_to_client(int client_fd, const MonteCarloResult &result) {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2);
+        oss << "Covered Area: " << result.covered_area << " units²\n";
+        oss << "Percentage of Canvas Covered: " << result.percentage_covered << "%\n";
+
+        std::string response_str = oss.str();
+        // std::cout << "Server TX (fd " << client_fd << "):\n" << response_str;
+        return send_all(client_fd, response_str.c_str(), response_str.length());
     }
 
     bool TcpServer::send_all(int sockfd, const char *buffer, size_t length) {
         size_t total_sent = 0;
         while (total_sent < length) {
-            ssize_t sent_this_call = send(sockfd, buffer + total_sent, length - total_sent, 0);
-            if (sent_this_call < 0) {
-                if (errno == EINTR)
+            size_t sent_this_call = send(sockfd, buffer + total_sent, length - total_sent, 0);
+
+            if (sent_this_call <= 0) {
+                if (sent_this_call < 0 && errno == EINTR) {
                     continue; // Interrupted by signal, try again
-                perror("send_all failed");
+                }
+                perror((std::string("Server::send_all failed on fd ") + std::to_string(sockfd)).c_str());
                 return false;
             }
-
             total_sent += sent_this_call;
         }
         return true;
     }
-
-    bool TcpServer::send_response_to_client(int client_socket_fd, const MonteCarloResult &result) {
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2); // Format numbers to two decimal places
-        oss << "Covered Area: " << result.covered_area << " units²\n";
-        oss << "Percentage of Canvas Covered: " << result.percentage_covered << "%\n";
-
-        std::string response_str = oss.str();
-        std::cout << "Server TX:\n"
-                  << response_str;
-        return send_all(client_socket_fd, response_str.c_str(), response_str.length());
-    }
-
 } // namespace Server

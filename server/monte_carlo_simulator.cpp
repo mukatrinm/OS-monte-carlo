@@ -65,7 +65,7 @@ namespace Server {
             }
 
             if (relative_error <= TARGET_RELATIVE_ERROR) {
-                std::cout << "Stabilization achieved with relative error: " << relative_error * 100 << "%" << std::endl;
+                // std::cout << "Stabilization achieved with relative error: " << relative_error * 100 << "%" << std::endl;
                 break; // Stabilization achieved
             }
 
@@ -77,8 +77,8 @@ namespace Server {
             }
         }
 
-        std::cout << "number of points inside any ellipse: " << points_inside_any_ellipse << std::endl;
-        std::cout << "total number of points sampled: " << total_points_sampled << std::endl;
+        // std::cout << "number of points inside any ellipse: " << points_inside_any_ellipse << std::endl;
+        // std::cout << "total number of points sampled: " << total_points_sampled << std::endl;
 
         double final_proportion = (total_points_sampled == 0) ? 0.0 : static_cast<double>(points_inside_any_ellipse) / total_points_sampled;
         double covered_area = final_proportion * TOTAL_CANVAS_AREA;

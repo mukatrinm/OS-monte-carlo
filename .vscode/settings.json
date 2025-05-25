@@ -50,6 +50,10 @@
     "unordered_map": "cpp",
     "variant": "cpp",
     "algorithm": "cpp",
-    "random": "cpp"
+    "random": "cpp",
+    "__tree": "cpp",
+    "csignal": "cpp",
+    "fstream": "cpp",
+    "map": "cpp"
   }
 }
