@@ -1,5 +1,6 @@
 #include "server.h"
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -38,7 +39,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    
     struct sigaction sa;
     sa.sa_handler = signal_handler_stop_server;
     sigemptyset(&sa.sa_mask);
@@ -57,8 +57,8 @@ int main(int argc, char *argv[]) {
         Server::TcpServer server(port);
         g_tcp_server_instance = &server;
 
-        server.start();
-        g_tcp_server_instance = nullptr; // when server is stopped
+        server.start(); 
+        g_tcp_server_instance = nullptr;
         std::cout << "Main: Server has shut down gracefully." << std::endl;
     } catch (const std::exception &e) {
         std::cerr << "Server runtime error: " << e.what() << std::endl;
