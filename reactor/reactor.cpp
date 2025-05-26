@@ -99,11 +99,8 @@ void Reactor::run() {
                         handlers_[fd](fd);
                     } catch (const std::exception &e) {
                         std::cerr << "Reactor: Exception in handler for fd " << fd << ": " << e.what() << std::endl;
-                        // Optionally remove the FD or take other error handling steps
-                        // For example, removeFd(fd);
                     } catch (...) {
                         std::cerr << "Reactor: Unknown exception in handler for fd " << fd << std::endl;
-                        // removeFd(fd);
                     }
                 }
             }
