@@ -22,6 +22,14 @@ namespace Server {
             shared_log_file_ << std::fixed << std::setprecision(3);
             shared_log_file_ << "--- Server Started --- Port: " << port_ << std::endl;
         }
+
+        std::string milestone_log_filename = "coverage_milestones.log";
+        milestone_log_file_.open(milestone_log_filename, std::ios::out | std::ios::trunc);
+        if (!milestone_log_file_.is_open()) {
+            std::cerr << "Warning: Could not open milestone log file: " << milestone_log_filename << std::endl;
+        } else {
+            milestone_log_file_ << "--- Coverage Milestones Log ---" << std::endl;
+        }
     }
 
     TcpServer::~TcpServer() {
@@ -39,6 +47,10 @@ namespace Server {
         if (shared_log_file_.is_open()) {
             shared_log_file_ << "--- Server Stopped ---" << std::endl;
             shared_log_file_.close();
+        }
+        if (milestone_log_file_.is_open()) {
+            milestone_log_file_ << "--- Logging Ended ---" << std::endl;
+            milestone_log_file_.close();
         }
     }
 
@@ -84,6 +96,9 @@ namespace Server {
         }
 
         is_server_running_.store(true);
+
+        notifier_thread_ = std::thread(&TcpServer::notifier_thread_function, this);
+        std::cout << "TcpServer::start: Notifier thread started." << std::endl;
         std::cout << "TcpServer::start: Server is running. Accepting connections." << std::endl;
 
         while (is_server_running_.load()) {
@@ -121,6 +136,10 @@ namespace Server {
         }
 
         std::cout << "TcpServer::start: Accept loop finished." << std::endl;
+
+        // Ensure server_running is false and notify consumer thread to allow it to exit its loop.
+        is_server_running_.store(false);
+        queue_cv_.notify_all(); // Wake up notifier thread if it's waiting on empty queue
     }
 
     void TcpServer::shutdown() {
@@ -131,6 +150,9 @@ namespace Server {
             std::cout << "TcpServer: Already shutting down or stopped." << std::endl;
             return;
         }
+
+        // Notify the notifier thread that server is stopping and it should process remaining queue then exit.
+        queue_cv_.notify_all();
 
         // Close the listening socket to unblock the accept() call in start()
         if (server_socket_fd_ != -1) {
@@ -145,6 +167,51 @@ namespace Server {
         }
 
         std::cout << "TcpServer: Shutdown signaled. Main accept loop should terminate. Client threads will exit when is_server_running_ is false." << std::endl;
+    }
+
+    void TcpServer::notifier_thread_function() {
+        std::cout << "Notifier Thread: Started." << std::endl;
+        double max_coverage = 0.0;
+        int last_band = 0; // 0, 10, 20 …
+
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+
+        while (true) {
+            // Wait for either a coverage event or server shutdown
+            queue_cv_.wait(lock, [this] {
+                return !is_server_running_.load() || !coverage_event_queue_.empty();
+            });
+
+            if (!is_server_running_.load() && coverage_event_queue_.empty())
+                break;
+
+            CoverageEvent ev = coverage_event_queue_.front();
+            coverage_event_queue_.pop_front();
+            lock.unlock();
+
+            // Process the coverage event
+            if (ev.percentage_coverage_achieved > max_coverage)
+                max_coverage = ev.percentage_coverage_achieved;
+
+            int band = static_cast<int>(max_coverage / 10) * 10;
+            if (band >= 10 && band > last_band) {
+                if (milestone_log_file_.is_open()) {
+                    milestone_log_file_ << "Milestone ~" << band << "%, total ellipses "
+                                        << ev.total_server_ellipses_at_event
+                                        << " (client " << ev.client_id
+                                        << " reported " << ev.percentage_coverage_achieved << "%)\n";
+                    milestone_log_file_.flush();
+                }
+                std::cout << "Notifier: reached ~" << band
+                          << "% coverage (" << ev.total_server_ellipses_at_event
+                          << " ellipses)\n";
+                last_band = band;
+            }
+
+            lock.lock(); // re-acquire for next loop
+        }
+
+        std::cout << "Notifier Thread: exiting\n";
     }
 
     void TcpServer::client_handler_thread(int client_socket_fd, int client_id_for_log) {
@@ -201,6 +268,13 @@ namespace Server {
                                          << ", Est. Coverage=" << sim_res.percentage_covered << "%\n";
                         shared_log_file_.flush();
                     }
+
+                    // Produce Coverage Event for Notifier
+                    {
+                        std::lock_guard<std::mutex> lock(queue_mutex_);
+                        coverage_event_queue_.push_back({sim_res.percentage_covered, messages_processed_count_, client_id_for_log});
+                    }
+                    queue_cv_.notify_one();
                 }
 
             } else if (read_result.status == ReadLineStatus::Disconnected) {
